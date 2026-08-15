@@ -1294,9 +1294,41 @@ public class ComputerUtil {
         return false;
     }
 
+    /**
+     * Does this spell draw its controller a card, at the root or in any sub-ability?
+     *
+     * Walks the chain because the draw is often not the top-level effect -- "Draw a card.
+     * Investigate." carries it at the root, but plenty of spells bury it one level down.
+     */
+    private static boolean drawsCardForController(final SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (ApiType.Draw == s.getApi()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Does this permanent have a trigger that cares about its controller drawing?
+     *
+     * Read off the trigger rather than the card's text or a per-card SVar, so any "whenever you
+     * draw" card in any set is covered without editing its script. Sees triggers only: a static
+     * ability keyed on draws this turn, such as Tome Anima's, is not a Trigger and is missed here.
+     */
+    private static boolean caresAboutDrawing(final Card c) {
+        for (Trigger t : c.getTriggers()) {
+            if (TriggerType.Drawn == t.getMode()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static boolean castSpellInMain1(final Player ai, final SpellAbility sa) {
         final Card source = sa.getHostCard();
         final SpellAbility sub = sa.getSubAbility();
+        final PhaseHandler ph = ai.getGame().getPhaseHandler();
 
         if (source != null && "ALWAYS".equals(source.getSVar("PlayMain1"))) {
             return true;
@@ -1326,6 +1358,18 @@ public class ComputerUtil {
                 }
             }
             if (ApiType.PermanentNoncreature.equals(sa.getApi()) && buffedCard.hasKeyword(Keyword.PROWESS)) {
+                return true;
+            }
+            // A "whenever you draw" permanent is the draw-spell equivalent of prowess above: the
+            // trigger is worth nothing once combat is over, so a cantrip has to resolve before
+            // attackers are declared or the payoff never applies to that turn's attack. Measured on
+            // a deck built around Mystic Skyfish and Faerie Vandal, 100% of its cantrips were being
+            // held for Main 2 and every trigger fired too late to affect the attack it existed for.
+            // Restricted to MAIN1 deliberately: DrawAi consults this method for EVERY phase before
+            // MAIN2, so an unguarded true also releases the spell during upkeep and mid-combat,
+            // which scatters the casts instead of landing them before attackers are declared.
+            if (ph.is(PhaseType.MAIN1, ai) && drawsCardForController(sa)
+                    && caresAboutDrawing(buffedCard)) {
                 return true;
             }
             //Fill the graveyard for Threshold
