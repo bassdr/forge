@@ -574,6 +574,28 @@ public class ComputerUtilCard {
             if (c.isPlaneswalker()) {
                 value += c.getCounters(CounterEnumType.LOYALTY) * 10;
             }
+            // Mana value says what a permanent cost, not what it is still going to do. Two
+            // board states contradict it sharply enough to invert a choice, and in both the
+            // error runs the same way: the expensive permanent is the spent one.
+            //
+            // A Saga spends itself. When its lore counters reach the final chapter it is
+            // sacrificed anyway, so exiling one whose good chapters have already resolved buys
+            // almost nothing -- and Sagas are expensive, so CMC ranks them top exactly when
+            // they are worth least. Value the chapters that have NOT happened yet.
+            if (c.isSaga() && c.getFinalChapterNr() > 0) {
+                final int remaining = Math.max(0,
+                        c.getFinalChapterNr() - c.getCounters(CounterEnumType.LORE));
+                value = 50 + (value - 50) * remaining / c.getFinalChapterNr();
+            }
+            // An Equipment lying unattached does nothing. Attached, it is buffing a creature
+            // right now, and Equipment is typically cheap -- so CMC ranks it last exactly when
+            // it is worth most. Note this is the Equipment's own side of the judgement:
+            // useRemovalNow() doubles valueTempo for an equipped creature, but that decides
+            // WHETHER to cast removal, not WHOM to target, and evaluateCreature() -- which does
+            // pick the target -- has no attachment term at all.
+            if (c.isEquipment() && c.isEquipping()) {
+                value += 60;
+            }
         }
 
         // tokens are slightly better since they'll be gone forever
