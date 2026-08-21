@@ -564,7 +564,86 @@ public class ComputerUtilCard {
     }
 
     /**
-     * Measurement gate for a removal-targeting change, off unless explicitly switched on.
+     * How much of a Saga has NOT happened yet, as a fraction of everything it was ever going to
+     * do. Scales its removal priority: mana value says what a Saga cost, not what it still owes.
+     *
+     * Counting the chapters it has left gets this only half right, because what matters is what
+     * those chapters DO. Burn, Burn, Tree and Fern reads I: six damage, II: destroy an artifact,
+     * then III and IV: "Add {R}". From chapter III on, the entire remaining Saga is worth one red
+     * mana and removing it is a wasted card -- yet counting chapters still prices it at a quarter
+     * of a threat. So weigh each remaining chapter by what its ability does, and let a mana
+     * ability be worth nothing.
+     *
+     * Known limit, stated because it bounds what this can fix: the weights are static, so a
+     * chapter whose payoff depends on board state is invisible. The Misty Mountains Cold turns
+     * four Treasures into a 6/6 at IV, but all four of its chapters share one ability script, so
+     * it still scores flat across them -- no worse than counting chapters, and no better.
+     */
+    private static double sagaRemainingFraction(final Card c) {
+        final int lore = c.getCounters(CounterEnumType.LORE);
+        int total = 0;
+        int remaining = 0;
+        for (final Trigger t : c.getTriggers()) {
+            if (!t.hasParam("Chapter")) {
+                continue;
+            }
+            final int chapter;
+            try {
+                chapter = Integer.parseInt(t.getParam("Chapter"));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            final int worth = chapterValue(t);
+            total += worth;
+            if (chapter > lore) {
+                remaining += worth;
+            }
+        }
+        if (total <= 0) {
+            // Nothing readable -- fall back to counting chapters, which is what this refines.
+            final int last = c.getFinalChapterNr();
+            return last <= 0 ? 1.0 : Math.max(0, last - lore) / (double) last;
+        }
+        return remaining / (double) total;
+    }
+
+    /** Worth of one chapter, walking its whole sub-ability chain rather than just the head. */
+    private static int chapterValue(final Trigger t) {
+        int worth = 0;
+        for (SpellAbility sa = t.getOverridingAbility(); sa != null; sa = sa.getSubAbility()) {
+            worth += chapterApiValue(sa.getApi());
+        }
+        return worth;
+    }
+
+    private static int chapterApiValue(final ApiType api) {
+        if (api == null) {
+            return 10;
+        }
+        switch (api) {
+            case Mana:
+                return 0;   // "Add {R}" is not worth spending a removal spell to deny
+            case Sacrifice:
+            case Cleanup:
+                return 0;   // a Saga sacrificing ITSELF is its cost, not its payoff
+            case DealDamage:
+            case Destroy:
+            case ChangeZone:
+                return 30;
+            case Token:
+                return 25;
+            case Draw:
+                return 20;
+            case PutCounter:
+            case Pump:
+                return 15;
+            default:
+                return 10;
+        }
+    }
+
+    /**
+     * Measurement gate for an AI change, off unless explicitly switched on.
      *
      * Both gated blocks change whom the AI shoots, so both can make it play worse. Defaulting
      * them off keeps every Forge number recorded against this fork comparable with the ones
@@ -575,7 +654,7 @@ public class ComputerUtilCard {
      * after its deck, so exporting one copy under a marked name and scoping to it runs patched
      * against stock on identical lists, which is the only comparison that can answer this.
      */
-    private static boolean removalGateOn(final String prop, final Player ai) {
+    public static boolean aiGateOn(final String prop, final Player ai) {
         if (!Boolean.getBoolean(prop)) {
             return false;
         }
@@ -630,7 +709,7 @@ public class ComputerUtilCard {
             // Removal that kills the creature takes the mana sunk into its attachments with it,
             // and evaluateCreature() cannot see that: the power and toughness a buff confers
             // arrive through getNetCombatDamage(), but the mana paid for the buff never does.
-            if (removalGateOn("mtg.attachmentValue", ai)) {
+            if (aiGateOn("mtg.attachmentValue", ai)) {
                 final int invested = attachmentInvestment(c);
                 value += invested * 5;
                 if (System.getProperty("mtg.attachmentDebug") != null) {
@@ -653,11 +732,9 @@ public class ComputerUtilCard {
             // sacrificed anyway, so exiling one whose good chapters have already resolved buys
             // almost nothing -- and Sagas are expensive, so CMC ranks them top exactly when
             // they are worth least. Value the chapters that have NOT happened yet.
-            if (removalGateOn("mtg.removalPriority", ai)
+            if (aiGateOn("mtg.removalPriority", ai)
                     && c.isSaga() && c.getFinalChapterNr() > 0) {
-                final int remaining = Math.max(0,
-                        c.getFinalChapterNr() - c.getCounters(CounterEnumType.LORE));
-                value = 50 + (value - 50) * remaining / c.getFinalChapterNr();
+                value = 50 + (int) ((value - 50) * sagaRemainingFraction(c));
             }
             // An Equipment lying unattached does nothing. Attached, it is buffing a creature
             // right now, and Equipment is typically cheap -- so CMC ranks it last exactly when
@@ -665,7 +742,7 @@ public class ComputerUtilCard {
             // useRemovalNow() doubles valueTempo for an equipped creature, but that decides
             // WHETHER to cast removal, not WHOM to target, and evaluateCreature() -- which does
             // pick the target -- has no attachment term at all.
-            if (removalGateOn("mtg.removalPriority", ai)
+            if (aiGateOn("mtg.removalPriority", ai)
                     && c.isEquipment() && c.isEquipping()) {
                 value += 60;
             }
