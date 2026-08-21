@@ -129,6 +129,25 @@ public class UntapAi extends SpellAbilityAi {
      *            a boolean.
      * @return a boolean.
      */
+    /** A sub-ability that makes one of our own creatures bigger, i.e. the spell is a trick. */
+    private static boolean buffsOurCreature(final SpellAbility subSa) {
+        if (subSa.getApi() != ApiType.Pump) {
+            return false;
+        }
+        return positiveAmount(subSa, "NumAtt") || positiveAmount(subSa, "NumDef");
+    }
+
+    private static boolean positiveAmount(final SpellAbility sa, final String key) {
+        if (!sa.hasParam(key)) {
+            return false;
+        }
+        try {
+            return Integer.parseInt(sa.getParam(key).replace("+", "").trim()) > 0;
+        } catch (NumberFormatException e) {
+            return false;   // an X or an SVar; not something to bet a combat trick on
+        }
+    }
+
     private static boolean untapPrefTargeting(final Player ai, final SpellAbility sa, final boolean mandatory) {
         final Card source = sa.getHostCard();
 
@@ -159,6 +178,14 @@ public class UntapAi extends SpellAbilityAi {
 
         // For some abilities, it may be worth to target even an untapped card if we're targeting mostly for the subability
         boolean targetUntapped = false;
+        if (System.getProperty("mtg.untapDebug") != null) {
+            final SpellAbility sub = sa.getSubAbility();
+            System.err.println("UNTAPDBG entry card=" + sa.getHostCard()
+                    + " gate=" + ComputerUtilCard.aiGateOn("mtg.untapTrick", ai)
+                    + " sub=" + (sub == null ? "none" : String.valueOf(sub.getApi()))
+                    + " buffs=" + (sub != null && buffsOurCreature(sub))
+                    + " listSize=" + list.size());
+        }
         if (sa.getSubAbility() != null) {
             SpellAbility subSa = sa.getSubAbility();
             if (subSa.getApi() == ApiType.RemoveFromCombat && "RemoveBestAttacker".equals(subSa.getParam("AILogic"))) {
@@ -171,6 +198,30 @@ public class UntapAi extends SpellAbilityAi {
                 if (list.isEmpty()) {
                     return false;
                 }
+            } else if (ComputerUtilCard.aiGateOn("mtg.untapTrick", ai)
+                    && !sa.isCurse() && buffsOurCreature(subSa)) {
+                if (System.getProperty("mtg.untapDebug") != null) {
+                    System.err.println("UNTAPDBG reached card=" + sa.getHostCard()
+                            + " combat=" + (ai.getGame().getCombat() != null)
+                            + " listSize=" + list.size());
+                }
+                // "Untap target creature you control. It gets +2/+2 until end of turn" is a
+                // combat trick whose untap half is usually beside the point. Filtered to TAPPED
+                // creatures below, such a card is simply never cast: Vow to Erebor came back 0
+                // casts in 300 measured games while a human cast it readily. Let the pump half
+                // choose the target instead -- but only once a combat exists, so the buff lands
+                // on a creature that is actually fighting rather than being burned in Main 1.
+                final Combat combat = ai.getGame().getCombat();
+                if (combat == null) {
+                    return false;
+                }
+                final CardCollection fighting = CardLists.filter(list,
+                        c -> combat.isAttacking(c) || combat.isBlocking(c));
+                if (fighting.isEmpty()) {
+                    return false;
+                }
+                targetUntapped = true;
+                list = fighting;
             }
         }
 
