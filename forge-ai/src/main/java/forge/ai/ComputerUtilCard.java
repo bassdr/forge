@@ -589,10 +589,81 @@ public class ComputerUtilCard {
         return Aggregates.itemWithMax(list, c -> evaluateRemovalTargetPriority(ai, c));
     }
 
+    /**
+     * Measurement gate for a removal-targeting change, off unless explicitly switched on.
+     *
+     * Both gated blocks change whom the AI shoots, so both can make it play worse. Defaulting
+     * them off keeps every Forge number recorded against this fork comparable with the ones
+     * taken before they existed -- the same rule the shim's AI_OVERRIDES follow.
+     *
+     * mtg.onlyPlayer scopes a gate to the side whose name contains it. A mirror cannot judge an
+     * AI change: both sides would get it and the split is 50% by construction. Forge names an AI
+     * after its deck, so exporting one copy under a marked name and scoping to it runs patched
+     * against stock on identical lists, which is the only comparison that can answer this.
+     */
+    private static boolean removalGateOn(final String prop, final Player ai) {
+        if (!Boolean.getBoolean(prop)) {
+            return false;
+        }
+        final String only = System.getProperty("mtg.onlyPlayer");
+        return only == null || only.isEmpty() || (ai != null && ai.getName().contains(only));
+    }
+
+    /**
+     * Mana the controller has sunk into this creature's attachments, in the same units as a
+     * creature's own mana value.
+     *
+     * An Aura and an Equipment are deliberately NOT priced the same, which is the whole reason
+     * this is its own method. An Aura is put into the graveyard when the creature leaves the
+     * battlefield (CR 704.5m), so killing the creature destroys its full mana value. An
+     * Equipment merely becomes unattached and survives, so the only thing its controller loses
+     * is paying the equip cost a second time -- charging its mana value too would price in a
+     * permanent still sitting on their battlefield, untouched.
+     *
+     * Only attachments controlled by the creature's own controller count: an opposing Aura is a
+     * Pacifism, and killing the creature it sits on does that controller a favour.
+     */
+    private static int attachmentInvestment(final Card c) {
+        int invested = 0;
+        for (final Card att : c.getAttachedCards()) {
+            if (!att.getController().equals(c.getController())) {
+                continue;
+            }
+            if (att.isAura()) {
+                invested += att.getCMC();
+            } else if (att.isEquipment()) {
+                invested += equipCost(att);
+            }
+        }
+        return invested;
+    }
+
+    /** Mana value of an Equipment's equip ability, i.e. what re-attaching it would cost. */
+    private static int equipCost(final Card equipment) {
+        for (final SpellAbility sa : equipment.getSpellAbilities()) {
+            if (sa.isEquip() && sa.getPayCosts() != null
+                    && sa.getPayCosts().getTotalMana() != null) {
+                return sa.getPayCosts().getTotalMana().getCMC();
+            }
+        }
+        return 0;
+    }
+
     private static int evaluateRemovalTargetPriority(final Player ai, final Card c) {
         int value;
         if (c.isCreature()) {
             value = evaluateCreature(c);
+            // Removal that kills the creature takes the mana sunk into its attachments with it,
+            // and evaluateCreature() cannot see that: the power and toughness a buff confers
+            // arrive through getNetCombatDamage(), but the mana paid for the buff never does.
+            if (removalGateOn("mtg.attachmentValue", ai)) {
+                final int invested = attachmentInvestment(c);
+                value += invested * 5;
+                if (System.getProperty("mtg.attachmentDebug") != null) {
+                    System.err.println("ATTACHDBG gate=on target=" + c.getName()
+                            + " invested=" + invested + " base=" + (value - invested * 5));
+                }
+            }
         } else if (c.isLand()) {
             value = evaluateLandRemovalPriority(ai, c, null, false);
         } else {
@@ -608,7 +679,8 @@ public class ComputerUtilCard {
             // sacrificed anyway, so exiling one whose good chapters have already resolved buys
             // almost nothing -- and Sagas are expensive, so CMC ranks them top exactly when
             // they are worth least. Value the chapters that have NOT happened yet.
-            if (c.isSaga() && c.getFinalChapterNr() > 0) {
+            if (removalGateOn("mtg.removalPriority", ai)
+                    && c.isSaga() && c.getFinalChapterNr() > 0) {
                 final int remaining = Math.max(0,
                         c.getFinalChapterNr() - c.getCounters(CounterEnumType.LORE));
                 value = 50 + (value - 50) * remaining / c.getFinalChapterNr();
@@ -619,7 +691,8 @@ public class ComputerUtilCard {
             // useRemovalNow() doubles valueTempo for an equipped creature, but that decides
             // WHETHER to cast removal, not WHOM to target, and evaluateCreature() -- which does
             // pick the target -- has no attachment term at all.
-            if (c.isEquipment() && c.isEquipping()) {
+            if (removalGateOn("mtg.removalPriority", ai)
+                    && c.isEquipment() && c.isEquipping()) {
                 value += 60;
             }
         }
