@@ -3,6 +3,7 @@ package forge.ai;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -557,10 +558,50 @@ public class ComputerUtilCard {
     }
 
     public static Card getBestRemovalTargetAI(final Player ai, final Iterable<Card> list) {
+        return getBestRemovalTargetAI(ai, list, null);
+    }
+
+    /**
+     * `sa` is used only by the measurement probe, which needs to name the card whose targeting
+     * decision this is -- an aggregate over every removal effect in a deck hides which one moved.
+     */
+    public static Card getBestRemovalTargetAI(final Player ai, final Iterable<Card> list,
+            final SpellAbility sa) {
         if (Iterables.isEmpty(list)) {
             return null;
         }
-        return Aggregates.itemWithMax(list, c -> evaluateRemovalTargetPriority(ai, c));
+        // The candidate list is everything this removal may legally hit, so it already answers
+        // the question attachmentStandsIn() needs: is the creature under that Equipment
+        // reachable at all? Every call site passes the filtered list, so no caller changes.
+        final Set<Integer> reachable = new HashSet<>();
+        for (final Card cand : list) {
+            reachable.add(cand.getId());
+        }
+        final Card best = Aggregates.itemWithMax(list,
+                c -> evaluateRemovalTargetPriority(ai, c, reachable));
+        // Second probe, and the one that separates "the term is too small" from "the term wins
+        // and something downstream discards the choice". The first probe only says the branch
+        // ran; without this the two are indistinguishable, which is the mistake this tree has
+        // already made twice.
+        if (System.getProperty("mtg.attachTargetDebug") != null) {
+            boolean standing = false;
+            final StringBuilder sb = new StringBuilder();
+            for (final Card c : list) {
+                if (attachmentStandsIn(ai, c, reachable) > 0) {
+                    standing = true;
+                }
+                sb.append(' ').append(c.getName()).append('=')
+                  .append(evaluateRemovalTargetPriority(ai, c, reachable));
+            }
+            if (standing) {
+                System.err.println("ATTACHPICKDBG src="
+                        + (sa == null ? "?" : sa.getHostCard().getName())
+                        + " player=" + (ai == null ? "?" : ai.getName())
+                        + " | picked=" + (best == null ? "none" : best.getName())
+                        + " | field:" + sb);
+            }
+        }
+        return best;
     }
 
     /**
@@ -702,7 +743,143 @@ public class ComputerUtilCard {
         return 0;
     }
 
-    private static int evaluateRemovalTargetPriority(final Player ai, final Card c) {
+    /**
+     * What an attachment is worth when it is standing in for a holder we cannot shoot, in the
+     * same units as evaluateCreature(). Zero in every other case.
+     *
+     * Zero when the holder IS reachable, and that is the important half: with both on the table
+     * killing the creature is nearly always better, and Forge already ranks it that way. This
+     * only fires where the creature is off limits and the attachment is not, so it cannot
+     * reorder any choice the AI was already making sensibly.
+     *
+     * Zero for an opposing attachment as well -- a Pacifism on their creature is doing our work
+     * for us, and blowing it up hands the creature back.
+     */
+    private static int attachmentStandsIn(final Player ai, final Card att,
+            final Set<Integer> reachable) {
+        if (reachable == null || !att.isAttachment() || !att.isAttachedToEntity()) {
+            return 0;
+        }
+        final Card holder = att.getAttachedTo();
+        if (holder == null || !holder.isCreature()) {
+            return 0;
+        }
+        if (reachable.contains(holder.getId())) {
+            return 0;
+        }
+        if (!att.getController().equals(holder.getController())) {
+            return 0;
+        }
+        if (ai != null && !holder.getController().isOpponentOf(ai)) {
+            return 0;
+        }
+        // A shield -- hexproof, shroud, protection -- is the reason the holder is off limits in
+        // the first place, so taking it off is what makes every removal spell we hold live
+        // against that creature again. Rank the attachment AS the creature it is hiding. Note
+        // evaluateCreature() reads the holder's keywords and power as they stand right now, so
+        // it already contains everything this attachment grants; adding the grant on top would
+        // count it twice.
+        //
+        // That single line is what makes the term scale the right way, which the arithmetic
+        // alone did not. My Precious on a hexproof, unblockable Dain outranks a bare 3/2
+        // trample Thorin (~265 against 185) -- the choice this patch exists to fix -- while the
+        // same Equipment on a 1/1 recruit token does not (~165), because there the shield is
+        // hiding nothing worth digging out.
+        if (attachmentShields(att)) {
+            return evaluateCreature(holder);
+        }
+        return attachmentGrant(att, holder);
+    }
+
+    /** Whether this attachment is what puts its holder out of reach of targeted removal. */
+    private static boolean attachmentShields(final Card att) {
+        for (final StaticAbility st : att.getStaticAbilities()) {
+            if (!st.checkMode(StaticAbilityMode.Continuous) || !st.hasParam("AddKeyword")) {
+                continue;
+            }
+            for (final String kw : st.getParam("AddKeyword").split(" & ")) {
+                final String k = kw.trim();
+                if (k.startsWith("Hexproof") || k.startsWith("Shroud") || k.startsWith("Protection")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * What an attachment is granting its holder right now, read off its own static abilities
+     * rather than off its mana value -- which is what makes this generalise past Equipment to
+     * Auras, and past this set. Only reached for an attachment that does NOT shield its holder;
+     * see attachmentStandsIn() for that case.
+     */
+    private static int attachmentGrant(final Card att, final Card holder) {
+        final int power = Math.max(0, holder.getNetCombatDamage());
+        final int toughness = Math.max(0, holder.getNetToughness());
+        int worth = 0;
+        for (final StaticAbility st : att.getStaticAbilities()) {
+            if (st.checkMode(StaticAbilityMode.CantBlockBy)) {
+                // Same term evaluateCreature() gives an unblockable creature.
+                worth += power * 10;
+            }
+            if (!st.checkMode(StaticAbilityMode.Continuous)) {
+                continue;
+            }
+            worth += staticInt(st, "AddPower") * 15;
+            worth += staticInt(st, "AddToughness") * 10;
+            if (!st.hasParam("AddKeyword")) {
+                continue;
+            }
+            for (final String kw : st.getParam("AddKeyword").split(" & ")) {
+                worth += grantedKeywordValue(kw.trim(), power, toughness);
+            }
+        }
+        return worth;
+    }
+
+    /** A granted keyword in evaluateCreature()'s units; an unrecognised one is not worth zero. */
+    private static int grantedKeywordValue(final String kw, final int power, final int toughness) {
+        if (power <= 0) {
+            return 10;
+        }
+        if (kw.startsWith("Flying") || kw.startsWith("Lifelink") || kw.startsWith("Horsemanship")) {
+            return power * 10;
+        }
+        if (kw.startsWith("Double Strike")) {
+            return 10 + power * 15;
+        }
+        if (kw.startsWith("First Strike")) {
+            return 10 + power * 5;
+        }
+        if (kw.startsWith("Deathtouch")) {
+            return 25;
+        }
+        if (kw.startsWith("Vigilance")) {
+            return power * 5 + toughness * 5;
+        }
+        if (kw.startsWith("Menace")) {
+            return power * 4;
+        }
+        if (kw.startsWith("Trample")) {
+            return Math.max(0, power - 1) * 5;
+        }
+        return 10;
+    }
+
+    /** A static ability's numeric parameter, or 0 when it is absent or an SVar we cannot read. */
+    private static int staticInt(final StaticAbility st, final String param) {
+        if (!st.hasParam(param)) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(st.getParam(param).trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static int evaluateRemovalTargetPriority(final Player ai, final Card c,
+            final Set<Integer> reachable) {
         int value;
         if (c.isCreature()) {
             value = evaluateCreature(c);
@@ -745,6 +922,45 @@ public class ComputerUtilCard {
             if (aiGateOn("mtg.removalPriority", ai)
                     && c.isEquipment() && c.isEquipping()) {
                 value += 60;
+            }
+            // An attachment on a creature this removal CANNOT reach is the only handle we have
+            // on that creature, and mana value knows nothing about it. Observed in a played
+            // game: My Precious ({3} Equipment, "equipped creature has hexproof and can't be
+            // blocked") sat on a Dain the AI could not target, and the AI spent its Celebrate
+            // the Mountain-king exiling a bare Thorin instead -- 185-ish against My Precious's
+            // 140 -- while the untouchable, unblockable Dain attacked seven times unopposed.
+            //
+            // This is a DIFFERENT patch from mtg.attachmentValue, and it refutes the reason
+            // that one was shelved. There, hexproof was written down as the case the idea could
+            // never help ("its holder cannot be targeted by removal at all"). It is in fact the
+            // case where the attachment BECOMES the correct target, and the one board state
+            // where the attachment is worth more than the creature under it.
+            final int standIn = attachmentStandsIn(ai, c, reachable);
+            // Probe outside the gate on purpose. Reporting only when the gate is on leaves the
+            // control arm with no distribution to difference against, and "the hook is dead"
+            // and "the hook fires and does not matter" are indistinguishable from the outside
+            // -- both have already been mistaken for the other in this tree, and each answer
+            // changes what to do next.
+            if (standIn > 0 && System.getProperty("mtg.attachTargetDebug") != null) {
+                System.err.println("ATTACHTGTDBG target=" + c.getName()
+                        + " holder=" + (c.getAttachedTo() == null ? "?" : c.getAttachedTo().getName())
+                        + " player=" + (ai == null ? "?" : ai.getName())
+                        + " base=" + value + " standIn=" + standIn
+                        + " gate=" + aiGateOn("mtg.attachTarget", ai));
+            }
+            if (aiGateOn("mtg.attachTarget", ai) && standIn > 0) {
+                // REPLACES the mana-value heuristic rather than adding to it, which a first
+                // version got wrong. 50 + 30*CMC prices an Equipment by what it cost; standing
+                // in for an unreachable creature is worth what that creature is, and the two
+                // must not be summed. Measured on a 20-game probe, adding them ranked My
+                // Precious on a 1/1 recruit token (140 + 80 = 220) above a bare 3/2 trample
+                // Thorin (185) -- exiling a shield off a 1/1 to free a token nobody wants.
+                //
+                // It also discards the +60 mtg.removalPriority gives an equipping Equipment,
+                // deliberately and only on this branch: that bonus is a guess at the same thing
+                // this measures. The two gates are independent everywhere else, so a run with
+                // both on still attributes cleanly.
+                value = 50 + standIn;
             }
         }
 
