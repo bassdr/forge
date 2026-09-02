@@ -12,6 +12,11 @@ import forge.player.GamePlayerUtil;
 import java.io.File;
 import java.io.FilenameFilter;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manages playback of all sounds for the client.
@@ -25,18 +30,41 @@ public class SoundSystem {
     private static final String[] SOUND_RESOURCE_PATHS = {ForgeConstants.USER_CUSTOM_DIR, ForgeConstants.CACHE_DIR};
 
     private static final IAudioClip emptySound = new NoSoundClip();
-    private static final Map<SoundEffectType, IAudioClip> loadedClips = new EnumMap<>(SoundEffectType.class);
-    private static final Map<String, IAudioClip> loadedScriptClips = new HashMap<>();
+    private static final Map<SoundEffectType, IAudioClip> loadedClips =
+            Collections.synchronizedMap(new EnumMap<>(SoundEffectType.class));
+    private static final Map<String, IAudioClip> loadedScriptClips = new ConcurrentHashMap<>();
+
+    /**
+     * Sound effects are requested from the game thread, and opening an audio line can block in the
+     * driver for as long as the device stays busy -- which stalls the match. Playback is
+     * fire-and-forget, so it runs here instead, and requests the device cannot keep up with are
+     * dropped rather than queued behind it.
+     */
+    private static final int MAX_QUEUED_SOUNDS = 32;
+    private static final ExecutorService soundQueue = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(MAX_QUEUED_SOUNDS),
+            r -> {
+                Thread t = new Thread(r, "Forge sound");
+                t.setDaemon(true);
+                return t;
+            },
+            new ThreadPoolExecutor.DiscardPolicy());
 
     private final EventVisualizer visualizer;
 
     private boolean shouldPlayMusic = true;
     private boolean hasWindowFocus = true;
-    private boolean ignorePlayRequests = false;
+    private volatile boolean ignorePlayRequests = false;
 
     private SoundSystem() {
         this.visualizer = new EventVisualizer(GamePlayerUtil.getGuiPlayer());
     }
+    private static boolean soundsEnabled() {
+        return GuiBase.getInterface().isLibgdxPort()
+                ? FModel.getPreferences().getPrefInt(FPref.UI_VOL_SOUNDS) >= 1
+                : FModel.getPreferences().getPrefBoolean(FPref.UI_ENABLE_SOUNDS);
+    }
+
     private static boolean isUsingAltSystem() {
         return !GuiBase.getInterface().isLibgdxPort() && FModel.getPreferences().getPrefBoolean(FPref.UI_ALT_SOUND_SYSTEM);
     }
@@ -49,11 +77,7 @@ public class SoundSystem {
      *         was unavailable or failed to load.
      */
     protected IAudioClip fetchResource(final SoundEffectType type) {
-        if (GuiBase.getInterface().isLibgdxPort()) {
-            if (FModel.getPreferences().getPrefInt(FPref.UI_VOL_SOUNDS)<1) {
-                return emptySound;
-            }
-        } else if (!FModel.getPreferences().getPrefBoolean(FPref.UI_ENABLE_SOUNDS)) {
+        if (!soundsEnabled()) {
             return emptySound;
         }
 
@@ -76,11 +100,7 @@ public class SoundSystem {
      *         was unavailable or failed to load.
      */
     protected IAudioClip fetchResource(final String fileName) {
-        if (GuiBase.getInterface().isLibgdxPort()) {
-            if (FModel.getPreferences().getPrefInt(FPref.UI_VOL_SOUNDS)<1) {
-                return emptySound;
-            }
-        } else if (!FModel.getPreferences().getPrefBoolean(FPref.UI_ENABLE_SOUNDS)) {
+        if (!soundsEnabled()) {
             return emptySound;
         }
 
@@ -96,12 +116,9 @@ public class SoundSystem {
     }
 
     public boolean hasResource(final SoundEffectType type) {
-        boolean result = true;
-        IAudioClip clip = fetchResource(type);
-        if(clip.equals(emptySound)) {
-            result = false;
-        }
-        return result;
+        // Called from the game thread while picking which effect to play, so it must not build a
+        // clip -- that opens an audio line, which is the one thing here that can block.
+        return soundsEnabled() && getSoundResource(type.getResourceFileName()) != null;
     }
     
     /**
@@ -109,6 +126,13 @@ public class SoundSystem {
      * ("synchronized" with other sounds of the same kind means: only one can play at a time).
      */
     public void play(final String resourceFileName, final boolean isSynchronized) {
+        if (ignorePlayRequests) {
+            return;
+        }
+        soundQueue.execute(() -> doPlay(resourceFileName, isSynchronized));
+    }
+
+    private void doPlay(final String resourceFileName, final boolean isSynchronized) {
         if (ignorePlayRequests) {
             return;
         }
@@ -131,6 +155,13 @@ public class SoundSystem {
      * Play the sound associated with the Sounds enumeration element.
      */
     public void play(final SoundEffectType type, final boolean isSynchronized) {
+        if (ignorePlayRequests) {
+            return;
+        }
+        soundQueue.execute(() -> doPlay(type, isSynchronized));
+    }
+
+    private void doPlay(final SoundEffectType type, final boolean isSynchronized) {
         if (ignorePlayRequests) {
             return;
         }
@@ -348,7 +379,7 @@ public class SoundSystem {
                 : !FModel.getPreferences().getPrefBoolean(FPref.UI_ENABLE_MUSIC);
     }
 
-    private static final Map<Integer, List<String>> soundResourceDirectoryCache = new HashMap<>();
+    private static final Map<Integer, List<String>> soundResourceDirectoryCache = new ConcurrentHashMap<>();
 
     /**
      * Returns a list of audio resource directories, in order of overrides. The subPath parameter is usually either
@@ -414,7 +445,7 @@ public class SoundSystem {
         return availableSets.toArray(new String[0]);
     }
 
-    private static final Map<Integer, File> soundResourceAssetCache = new HashMap<>();
+    private static final Map<Integer, File> soundResourceAssetCache = new ConcurrentHashMap<>();
 
     /**
      * Searches through available sound resource directories for a sound matching the given filename.
