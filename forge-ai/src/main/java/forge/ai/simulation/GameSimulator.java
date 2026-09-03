@@ -1,6 +1,8 @@
 package forge.ai.simulation;
 
 
+import com.google.common.collect.Lists;
+
 import forge.ai.AIOption;
 import forge.ai.ComputerUtil;
 import forge.ai.PlayerControllerAi;
@@ -10,6 +12,7 @@ import forge.game.GameActionUtil;
 import forge.game.card.Card;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
+import forge.game.spellability.AbilitySub;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.TargetChoices;
 import forge.util.collect.FCollectionView;
@@ -155,11 +158,54 @@ public class GameSimulator {
             result = saMatcher(GameActionUtil.getAlternativeCosts(cSa, aiPlayer, true), desc);
         }
 
+        // A MODE of a modal spell is not one of the host card's spell abilities and never can
+        // be, so the matching above cannot succeed for one. Pinecone Strike is a single Charm
+        // SpellAbility ("Choose one or both --") whose two modes live in its Choices list as
+        // AbilitySubs; asking whether the card has an ability described "Pinecone Strike deals
+        // 3 damage to target creature..." is asking the wrong question. The caller turns the
+        // miss into Score(Integer.MIN_VALUE) -- the worst score an int can hold -- so every
+        // modal spell was being judged unplayable rather than judged at all.
+        //
+        // Its mode is reachable because setAdditionalAbilityList() parents each choice to the
+        // ability that owns it, so resolve the ROOT, which IS a top-level ability, and carry
+        // the mode across as the chosen list. Only ever reached when the ordinary match has
+        // already failed, so nothing that resolves today changes.
+        if (result == null && sa.getParent() != null) {
+            result = findModeInSimGame(sa, candidates);
+        }
+
         if (result != null) {
             result = SpellAbilityChoiceCopier.copyCastChoices(sa, result, aiPlayer);
         }
 
         return result;
+    }
+
+    /** The sim game's copy of a modal spell, with `mode` selected. Null if it is not modal. */
+    private SpellAbility findModeInSimGame(final SpellAbility mode,
+            final FCollectionView<SpellAbility> candidates) {
+        final SpellAbility root = mode.getRootAbility();
+        if (root == mode) {
+            return null;
+        }
+        final SpellAbility simRoot = saMatcher(candidates, root.getDescription());
+        if (simRoot == null) {
+            return null;
+        }
+        // Matched on SpellDescription rather than on position, exactly as
+        // SpellAbilityChoiceCopier.copyChosenModes does: the choices are rebuilt in the copied
+        // game and only their text is reliably the same object-to-object.
+        for (final AbilitySub choice : simRoot.getAdditionalAbilityList("Choices")) {
+            if (Objects.equals(choice.getParam("SpellDescription"),
+                               mode.getParam("SpellDescription"))) {
+                // Leave an already-chosen list alone; the caller knows better than we do.
+                if (simRoot.getChosenList() == null) {
+                    simRoot.setChosenList(Lists.newArrayList(choice));
+                }
+                return simRoot;
+            }
+        }
+        return null;
     }
 
     private SpellAbility saMatcher(Iterable<SpellAbility> candidates, String desc) {
