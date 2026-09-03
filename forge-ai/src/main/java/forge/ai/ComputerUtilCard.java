@@ -904,6 +904,66 @@ public class ComputerUtilCard {
         }
     }
 
+    /**
+     * What a creature is worth to remove BECAUSE of Storied. Two separate things, and only one
+     * of them is time-limited.
+     *
+     * BEFORE the story latches, a creature carrying the keyword is the switch. Storied needs
+     * both a card WITH the keyword on the battlefield and three historic permanents, and Forge
+     * builds it as Mode$ Always (CardFactoryUtil, keyword Storied), so it fires the instant
+     * both hold. A carrier in play with the story still off therefore means its controller is
+     * SHORT of permanents -- and how short is exactly how urgent killing it is.
+     *
+     * AFTER it latches, killing the carrier does not switch the story off: Forge only ever
+     * calls Player.setEnduringStory(true), so it is on for the rest of the game. What does die
+     * with the creature is its own static abilities gated on Condition$ EnduringStory, and
+     * those are printed on the creature rather than on the story. That is the half that keeps
+     * this worth anything past turn six, and it is the half a human named from a played game:
+     * Dain's "creatures can't attack you unless their controller pays {1} for each of those
+     * creatures" stops being paid the moment Dain does.
+     *
+     * The two weights are dials, not measurements, and they are the only judgement here. A tax
+     * on our own attacks is scored above a defensive static because it is mana we hand over
+     * every combat; everything else about the ability is left unread rather than guessed at.
+     */
+    /**
+     * Marks the pre-latch branch in the debug probe and is subtracted before the value is used.
+     * The two branches produce overlapping numbers (40 and 80 both occur in each), so without
+     * this a probe line cannot say which fired -- and this tree has twice mistaken "the hook is
+     * dead" for "the hook fires and does not matter" for want of exactly that distinction.
+     */
+    private static final int PRE_LATCH = 100000;
+
+    private static int storiedRemovalValue(final Player ai, final Card c) {
+        final Player owner = c.getController();
+        if (owner == null || (ai != null && !owner.isOpponentOf(ai))) {
+            return 0;
+        }
+        if (!owner.hasEnduringStory()) {
+            if (!c.hasKeyword(Keyword.STORIED)) {
+                return 0;
+            }
+            int historic = 0;
+            for (final Card perm : owner.getCardsIn(ZoneType.Battlefield)) {
+                if (perm.isHistoric()) {
+                    historic++;
+                }
+            }
+            // Two permanents and a carrier is one play away from an engine that cannot then be
+            // switched off; none and a carrier is a long way off and barely worth a card.
+            return PRE_LATCH + Math.max(0, 40 * Math.min(historic, 2));
+        }
+        int value = 0;
+        for (final StaticAbility st : c.getStaticAbilities()) {
+            if (!"EnduringStory".equals(st.getParam("Condition"))) {
+                continue;
+            }
+            value += st.checkMode(StaticAbilityMode.CantAttackUnless)
+                    || st.checkMode(StaticAbilityMode.CantAttack) ? 80 : 40;
+        }
+        return value;
+    }
+
     private static int evaluateRemovalTargetPriority(final Player ai, final Card c,
             final Set<Integer> reachable) {
         int value;
@@ -912,6 +972,24 @@ public class ComputerUtilCard {
             // Removal that kills the creature takes the mana sunk into its attachments with it,
             // and evaluateCreature() cannot see that: the power and toughness a buff confers
             // arrive through getNetCombatDamage(), but the mana paid for the buff never does.
+            // Storied is worth exactly ZERO to evaluateCreature(), which has no term for a
+            // static ability of any kind. Named by David from a played game: with two otherwise
+            // equal creatures the AI shot the one that was NOT taxing its attacks. Counted,
+            // Dain, Lord of the Iron Hills reads 181 -- a 2/2 with vigilance -- against a 3/2
+            // trample Thorin's 186, and both the keyword and the {1}-per-attacker tax printed
+            // on Dain are invisible to the comparison.
+            if (aiGateOn("mtg.storiedTarget", ai)) {
+                final int tagged = storiedRemovalValue(ai, c);
+                final boolean pre = tagged >= PRE_LATCH;
+                final int storied = pre ? tagged - PRE_LATCH : tagged;
+                if (System.getProperty("mtg.storiedDebug") != null && storied > 0) {
+                    System.err.println("STORIEDDBG branch=" + (pre ? "pre" : "post")
+                            + " | target=" + c.getName()
+                            + " | player=" + (ai == null ? "?" : ai.getName())
+                            + " | base=" + value + " | storied=" + storied);
+                }
+                value += storied;
+            }
             if (aiGateOn("mtg.attachmentValue", ai)) {
                 final int invested = attachmentInvestment(c);
                 value += invested * 5;
