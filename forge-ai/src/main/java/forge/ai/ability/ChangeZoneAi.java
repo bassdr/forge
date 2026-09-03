@@ -816,6 +816,49 @@ public class ChangeZoneAi extends SpellAbilityAi {
             }
         }
 
+        // Battlefield -> Library ("tuck") is removal, and stock Forge gives it no phase gate at
+        // all. The branch directly above guards the same DESTINATION but only when the ORIGIN is
+        // a graveyard, so a tuck aimed at an opponent's creature falls through to
+        // SpellAbilityAi.checkPhaseRestrictions, which is `return true`. Measured across three
+        // logged human games, Uneasy Partings was cast in the AI's own UPKEEP three times out of
+        // three -- before its own draw step, and not once on the opponent's turn.
+        //
+        // Two costs, neither of which requires holding a land across turns to avoid:
+        //   - Uneasy Partings costs {1} less targeting an ATTACKING nontoken creature. That
+        //     window exists only during an opponent's combat, so upkeep casts always pay full
+        //     price. (Magnificent End's {3}-less-if-tapped clause has the same shape.)
+        //   - Casting in upkeep commits before our own draw for no compensation at all; the same
+        //     cast in Main 1 is the same turn and the same mana, with one more card known.
+        //
+        // Deliberately NOT the HoldRemovalAi shape, which reserved mana across turns and cost
+        // about ten points of win rate. Nothing is held overnight here. On our own turn the
+        // spell still resolves on that turn, merely from Main 1 rather than upkeep. On the
+        // opponent's turn we wait only until attackers are declared -- mana we were never going
+        // to spend on our own turn anyway -- and the gate reopens from that step onward, so a
+        // turn where nobody attacks still gets the cast rather than stranding the card.
+        if (destination.equals(ZoneType.Library) && origin.contains(ZoneType.Battlefield)) {
+            final boolean tooEarly = ph.isPlayerTurn(ai)
+                    ? ph.getPhase().isBefore(PhaseType.MAIN1)
+                    : ph.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS);
+            final boolean gateOn = ComputerUtilCard.aiGateOn("mtg.tuckTiming", ai);
+            // Probe OUTSIDE the gate, deliberately. Reporting only when the gate is on would
+            // leave the gate-off arm with no phase distribution to difference against, and the
+            // baseline is the whole point: "the hook is dead" and "the hook runs and does not
+            // matter" are indistinguishable from the outside, and each answer changes what to do
+            // next. Both have already been mistaken for the other in this tree.
+            if (System.getProperty("mtg.tuckDebug") != null) {
+                System.err.println("TUCKDBG card=" + sa.getHostCard()
+                        + " player=" + (ai == null ? "?" : ai.getName())
+                        + " phase=" + ph.getPhase()
+                        + " ourTurn=" + ph.isPlayerTurn(ai)
+                        + " gate=" + gateOn
+                        + " defer=" + (gateOn && tooEarly));
+            }
+            if (gateOn && tooEarly) {
+                return false;
+            }
+        }
+
         return super.checkPhaseRestrictions(ai, sa, ph);
     }
 
