@@ -1253,7 +1253,9 @@ public class AttachAi extends SpellAbilityAi {
                     return powerBonus + c.getNetPower() > 0 && ComputerUtilCombat.canAttackNextTurn(c);
                 });
             }
-            card = ComputerUtilCard.getBestAI(prefList);
+            card = ComputerUtilCard.aiGateOn("mtg.equipTarget", ai)
+                    ? bestAttachGain(ai, prefList, totPower, totToughness)
+                    : ComputerUtilCard.getBestAI(prefList);
         } else {
             for (Card pref : prefList) {
                 if (pref.isLand() && pref.isUntapped()) {
@@ -1270,6 +1272,49 @@ public class AttachAi extends SpellAbilityAi {
         }
 
         return card;
+    }
+
+    /**
+     * Which creature GAINS the most from this attachment, rather than which is already the best
+     * creature.
+     *
+     * getBestAI ranks the bodies as they stand and never looks at what the attachment adds, so
+     * the bonus lands on whichever creature already evaluates highest. Observed in a played game:
+     * Dwarven Provisioner (2/2) evaluates ~180 against Iron Hills Blacksmith (1/1 double strike)
+     * at ~170, so BOTH Axe tokens went to the Provisioner -- where each was worth +1 damage
+     * instead of the +2 it would have been on the double striker. CreatureEvaluator cannot see
+     * that interaction, because the Equipment is not attached at the moment the choice is made
+     * and so contributes nothing to getNetCombatDamage().
+     *
+     * Only double strike is weighted, deliberately. It is the one case where the arithmetic is
+     * certain -- the power bonus is applied twice, in two damage steps -- and this tree has a
+     * long record of speculative evaluation terms that fire and change nothing. Trample and
+     * evasion also make a power bonus worth more, but by an amount that depends on the blocker,
+     * which is exactly the kind of guess worth leaving out.
+     *
+     * The units match CreatureEvaluator: power is 15 a point, toughness 10.
+     */
+    private static Card bestAttachGain(final Player ai, final List<Card> list,
+            final int addPower, final int addToughness) {
+        Card best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (final Card c : list) {
+            final boolean twice = addPower > 0 && c.hasKeyword(Keyword.DOUBLE_STRIKE);
+            final int gain = (twice ? addPower * 2 : addPower) * 15 + addToughness * 10;
+            final int base = c.isCreature() ? ComputerUtilCard.evaluateCreature(c) : 0;
+            final int score = base + gain;
+            if (System.getProperty("mtg.equipDebug") != null) {
+                System.err.println("EQUIPDBG target=" + c.getName()
+                        + " | player=" + (ai == null ? "?" : ai.getName())
+                        + " | base=" + base + " | addP=" + addPower + " | ds=" + twice
+                        + " | gain=" + gain + " | score=" + score);
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = c;
+            }
+        }
+        return best;
     }
 
     /**
