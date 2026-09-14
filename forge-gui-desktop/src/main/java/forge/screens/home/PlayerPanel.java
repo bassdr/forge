@@ -398,6 +398,16 @@ public class PlayerPanel extends FPanel {
         return type == LobbySlotType.AI;
     }
 
+    /** 0 heuristics, 1 hybrid, 2 full. Anything unparseable falls back to heuristics. */
+    private static int savedSimulationMode() {
+        try {
+            int m = Integer.parseInt(FModel.getPreferences().getPref(FPref.UI_AI_SIMULATION_MODE));
+            return (m >= 0 && m <= 2) ? m : 0;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     public Set<AIOption> getAiOptions() {
         if (radioAi.isSelected()) {
             for (int i = 0; i < radioAiUseSimulation.getComponentCount(); i++) {
@@ -582,18 +592,26 @@ public class PlayerPanel extends FPanel {
 
         final ButtonGroup group = new ButtonGroup();
         radioAiUseSimulation = new JPopupMenu();
-        JRadioButtonMenuItem item = new JRadioButtonMenuItem("Heuristics");
-        item.addActionListener(e -> lobby.firePlayerChangeListener(index));
-        group.add(item);
-        radioAiUseSimulation.add(item);
-        item = new JRadioButtonMenuItem(localizer.getMessage("lblUseSimulation") + " (Hybrid)");
-        item.addActionListener(e -> lobby.firePlayerChangeListener(index));
-        group.add(item);
-        radioAiUseSimulation.add(item);
-        item = new JRadioButtonMenuItem(localizer.getMessage("lblUseSimulation"));
-        item.addActionListener(e -> lobby.firePlayerChangeListener(index));
-        group.add(item);
-        radioAiUseSimulation.add(item);
+        // Persisted, so the choice survives a restart. It was lobby-only state, which meant it
+        // silently reverted to Heuristics on every launch -- and since the two AIs are not close
+        // to equally strong, a session could be played against a different opponent than intended
+        // with nothing in the logs to say so.
+        final int savedMode = savedSimulationMode();
+        String[] labels = {"Heuristics",
+                           localizer.getMessage("lblUseSimulation") + " (Hybrid)",
+                           localizer.getMessage("lblUseSimulation")};
+        for (int mode = 0; mode < labels.length; mode++) {
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(labels[mode]);
+            final int chosen = mode;
+            item.addActionListener(e -> {
+                FModel.getPreferences().setPref(FPref.UI_AI_SIMULATION_MODE, String.valueOf(chosen));
+                FModel.getPreferences().save();
+                lobby.firePlayerChangeListener(index);
+            });
+            item.setSelected(mode == savedMode);
+            group.add(item);
+            radioAiUseSimulation.add(item);
+        }
         radioAi.setComponentPopupMenu(radioAiUseSimulation);
 
         radioHuman.addMouseListener(radioMouseAdapter(radioHuman, LobbySlotType.LOCAL));

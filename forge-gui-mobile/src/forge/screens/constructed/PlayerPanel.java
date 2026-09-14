@@ -74,6 +74,7 @@ public class PlayerPanel extends FContainer {
     private final FTextField txtPlayerName = new FTextField(Forge.getLocalizer().getMessage("lblPlayerName"));
     private final FToggleSwitch humanAiSwitch;
     private final FToggleSwitch devModeSwitch;
+    private final FToggleSwitch simulationSwitch;
 
     private FComboBox<Object> cbTeam = new FComboBox<>();
     private FComboBox<Object> cbArchenemyTeam = new FComboBox<>();
@@ -111,6 +112,14 @@ public class PlayerPanel extends FContainer {
 
         devModeSwitch = new FToggleSwitch(Forge.getLocalizer().getMessage("lblNormal"), Forge.getLocalizer().getMessage("lblDevMode"));
         devModeSwitch.setVisible(isNetworkHost());
+
+        // Mobile had the plumbing for a simulation AI (getAiOptions, setUseAiSimulation) but no
+        // control anywhere that set it, so the field was dead and the AI was always heuristics.
+        // Seeded from UI_AI_SIMULATION_MODE, which lives in the shared forge-gui module, so the
+        // choice is the same one the desktop lobby persists.
+        simulationSwitch = new FToggleSwitch("Heuristics", "Simulation");
+        simulationSwitch.setToggled(savedSimulationMode() > 0);
+        simulationSwitch.setVisible(isAi());
 
         cbTeam.setEnabled(true);
 
@@ -244,6 +253,8 @@ public class PlayerPanel extends FContainer {
             devModeSwitch.setChangedHandler(devModeSwitched);
             add(devModeSwitch);
         }
+        simulationSwitch.setChangedHandler(simulationSwitched);
+        add(simulationSwitch);
         add(btnDeck);
         btnDeck.setCommand(e -> {
             deckChooser.setHeaderCaption(Forge.getLocalizer().getMessage("lblSelectDeckFor").replace("%s", txtPlayerName.getText()));
@@ -389,6 +400,12 @@ public class PlayerPanel extends FContainer {
             devModeSwitch.setPosition(0, y);
         }
 
+        if (simulationSwitch.isVisible()) {
+            y += dy;
+            simulationSwitch.setSize(simulationSwitch.getAutoSizeWidth(fieldHeight), fieldHeight);
+            simulationSwitch.setPosition(0, y);
+        }
+
         if (Forge.isLandscapeMode()) {
             y += dy;
             x = PADDING;
@@ -457,6 +474,9 @@ public class PlayerPanel extends FContainer {
             rows++;
         }
         if (devModeSwitch.isVisible()) {
+            rows++;
+        }
+        if (simulationSwitch.isVisible()) {
             rows++;
         }
         return rows * (txtPlayerName.getHeight() + PADDING) + PADDING;
@@ -548,7 +568,31 @@ public class PlayerPanel extends FContainer {
         }
     };
 
+    /**
+     * HYBRID rather than FULL. Mobile's only previous mapping was USE_FULL_SIMULATION, which
+     * searches deepest and is the slowest of the three -- a poor default on a phone. Hybrid is the
+     * setting the desktop lobby offers alongside it and is what this project has measured.
+     */
+    private final FEventHandler simulationSwitched = new FEventHandler() {
+        @Override
+        public void handleEvent(FEvent e) {
+            prefs.setPref(FPref.UI_AI_SIMULATION_MODE, simulationSwitch.isToggled() ? "1" : "0");
+            prefs.save();
+        }
+    };
+
+    /** 0 heuristics, 1 hybrid, 2 full; anything unparseable falls back to heuristics. */
+    private static int savedSimulationMode() {
+        try {
+            int m = Integer.parseInt(FModel.getPreferences().getPref(FPref.UI_AI_SIMULATION_MODE));
+            return (m >= 0 && m <= 2) ? m : 0;
+        } catch (Exception ex) {
+            return 0;
+        }
+    }
+
     private void onIsAiChanged(boolean isAi) {
+        simulationSwitch.setVisible(isAi);
         deckChooser.setIsAi(isAi);
         lstCommanderDecks.setIsAi(isAi);
         lstTinyLeadersDecks.setIsAi(isAi);
@@ -1097,12 +1141,18 @@ public class PlayerPanel extends FContainer {
     }
 
     public Set<AIOption> getAiOptions() {
-        return isSimulatedAi()
+        if (!isSimulatedAi()) {
+            return Collections.emptySet();
+        }
+        // Honour a FULL setting made on desktop, but anything chosen here means hybrid: full
+        // simulation searches deepest and is much the slowest, which is the wrong default on a
+        // phone.
+        return savedSimulationMode() == 2
                 ? ImmutableSet.of(AIOption.USE_FULL_SIMULATION)
-                : Collections.emptySet();
+                : ImmutableSet.of(AIOption.USE_HYBRID_SIMULATION);
     }
     private boolean isSimulatedAi() {
-        return isAi() && useAiSimulation;
+        return isAi() && (useAiSimulation || simulationSwitch.isToggled());
     }
     public void setUseAiSimulation(final boolean useAiSimulation0) {
         useAiSimulation = useAiSimulation0;
@@ -1156,6 +1206,9 @@ public class PlayerPanel extends FContainer {
         nameRandomiser.setEnabled(mayEdit);
         refreshSlotToggle();
         cbTeam.setEnabled(mayEdit);
+        if (simulationSwitch != null) {
+            simulationSwitch.setEnabled(mayEdit);
+        }
         if (devModeSwitch != null) {
             devModeSwitch.setEnabled(mayEdit);
         }

@@ -200,6 +200,10 @@ public class ForgePreferences extends AbstractPreferences<ForgePreferences.FPref
         SUBMENU_UTILITIES ("false"),
 
         UI_CURRENT_AI_PROFILE ("Default"),
+        // Which AI the lobby's AI slots use: 0 heuristics, 1 hybrid simulation, 2 full simulation.
+        // Lobby-only state before this, so it reset to heuristics every launch and nothing recorded
+        // which one a game had been played against.
+        UI_AI_SIMULATION_MODE ("0"),
         MATCH_AI_SIDEBOARDING_MODE("Human For AI"),
         MATCH_AI_TIMEOUT("5"),
         UI_ENABLE_AI_CHEATS ("false"),
