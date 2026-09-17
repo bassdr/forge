@@ -45,6 +45,7 @@ import javax.sound.sampled.Clip;
 import javax.sound.sampled.DataLine;
 import javax.sound.sampled.LineEvent;
 import javax.sound.sampled.LineUnavailableException;
+import javax.sound.sampled.Mixer;
 import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.UnsupportedAudioFileException;
 
@@ -98,6 +99,31 @@ public class AudioClip implements IAudioClip {
         Thread t = new Thread(runnable, name);
         t.setDaemon(true);
         return t;
+    }
+
+    /**
+     * Java hands out one device line per Clip, and the ALSA/PipeWire plugin shows each as its own
+     * application stream -- so a session that has played 39 distinct effects appears 39 times in
+     * the mixer, which no other application does. The JDK ships a software mixer ("Gervill") that
+     * mixes any number of lines itself and opens the device ONCE, but it is no longer registered as
+     * a MixerProvider, so AudioSystem.getLine cannot return it. Measured on this set: 39 clips
+     * playing at once cost 2 PipeWire nodes through Gervill against 137 through the direct device.
+     *
+     * Needs --add-exports java.desktop/com.sun.media.sound=ALL-UNNAMED; null when that is absent,
+     * and then everything below behaves exactly as before.
+     */
+    private static final Mixer softMixer = openSoftMixer();
+
+    private static Mixer openSoftMixer() {
+        try {
+            Mixer mixer = (Mixer) Class.forName("com.sun.media.sound.SoftMixingMixer")
+                    .getDeclaredConstructor().newInstance();
+            mixer.open();
+            return mixer;
+        } catch (Throwable t) {
+            // No --add-exports, or a JDK that no longer ships it. One line per sound, as before.
+            return null;
+        }
     }
 
     private final String filename;
@@ -335,7 +361,7 @@ public class AudioClip implements IAudioClip {
                 AudioInputStream stream = AudioSystem.getAudioInputStream(bis);
                 AudioFormat format = stream.getFormat();
                 DataLine.Info info = new DataLine.Info(Clip.class, stream.getFormat(), ((int) stream.getFrameLength() * format.getFrameSize()));
-                Clip clip = (Clip) AudioSystem.getLine(info);
+                Clip clip = (Clip) (softMixer != null ? softMixer.getLine(info) : AudioSystem.getLine(info));
                 clip.open(stream);
                 return clip;
             } catch (IOException ex) {
