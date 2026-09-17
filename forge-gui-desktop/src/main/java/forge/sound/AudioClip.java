@@ -21,11 +21,21 @@ package forge.sound;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.MissingResourceException;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import javax.sound.sampled.AudioFormat;
@@ -49,6 +59,47 @@ import com.sipgate.mp3wav.Converter;
  */
 public class AudioClip implements IAudioClip {
     private final int maxSize = 16;
+
+    /**
+     * An audio line stays open from Clip.open() to Clip.close(), and nothing closed one during a
+     * match: dispose() is reachable only from invalidateSoundCache(), which the audio menu calls.
+     * So a session held maxSize lines for every effect it had ever played -- up to 16 x 39 files --
+     * and on a device that meters them (PipeWire) the count only ever climbed.
+     */
+    private static final int MAX_TOTAL_CLIPS = 64;
+    /** Close a pooled line once it has gone this long without being played. */
+    private static final long IDLE_TIMEOUT_MS = 10_000L;
+    private static final long REAP_PERIOD_MS = 5_000L;
+    /**
+     * Clip.open() has no timeout, and on an exhausted or wedged device it parks in the driver
+     * *while holding the mixer's own monitor* -- which also stops clips that are still playing from
+     * ever reaching stop() and reporting themselves idle, so the pool asks for another line. Doing
+     * it on the caller's thread is what turns a busy sound device into a frozen match.
+     */
+    private static final long OPEN_TIMEOUT_MS = 3_000L;
+    /** After a timed-out open, stop asking the device for a while rather than queueing more. */
+    private static final long STALL_BACKOFF_MS = 30_000L;
+
+    private static final AtomicInteger openClips = new AtomicInteger();
+    private static final AtomicLong stalledUntil = new AtomicLong();
+    private static final Set<AudioClip> pools = ConcurrentHashMap.newKeySet();
+
+    /** Blocking device work only. Separate from the reaper so a wedged open cannot stall it. */
+    private static final ExecutorService deviceExec =
+            Executors.newCachedThreadPool(runnable -> daemon(runnable, "Forge audio device"));
+    private static final ScheduledExecutorService reaper =
+            Executors.newSingleThreadScheduledExecutor(runnable -> daemon(runnable, "Forge audio reaper"));
+    static {
+        reaper.scheduleWithFixedDelay(AudioClip::reapIdleClips,
+                REAP_PERIOD_MS, REAP_PERIOD_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private static Thread daemon(Runnable runnable, String name) {
+        Thread t = new Thread(runnable, name);
+        t.setDaemon(true);
+        return t;
+    }
+
     private final String filename;
     private final List<ClipWrapper> clips;
     private boolean failed;
@@ -68,7 +119,9 @@ public class AudioClip implements IAudioClip {
 
     public AudioClip(final String filename) {
         this.filename = filename;
-        clips = new ArrayList<>(maxSize);
+        // Played from the game thread, reaped from the reaper thread.
+        clips = new CopyOnWriteArrayList<>();
+        pools.add(this);
         addClip();
     }
 
@@ -90,9 +143,11 @@ public class AudioClip implements IAudioClip {
 
     @Override
     public void dispose() {
-        for (byte[] b : audioClips.values()) {
-            b = null;
+        for (ClipWrapper clip : clips) {
+            clip.close();
         }
+        clips.clear();
+        pools.remove(this);
         audioClips.clear();
     }
 
@@ -116,16 +171,54 @@ public class AudioClip implements IAudioClip {
     }
 
     private ClipWrapper addClip() {
-        if (clips.size() < maxSize && !failed) {
-            ClipWrapper clip = new ClipWrapper(filename);
-            if (clip.isFailed()) {
-                failed = true;
-            } else {
-                clips.add(clip);
-            }
-            return clip;
+        if (clips.size() >= maxSize || failed
+                || openClips.get() >= MAX_TOTAL_CLIPS
+                || System.currentTimeMillis() < stalledUntil.get()) {
+            return ClipWrapper.Dummy;
         }
-        return ClipWrapper.Dummy;
+        Future<ClipWrapper> pending = deviceExec.submit(() -> new ClipWrapper(filename));
+        ClipWrapper clip;
+        try {
+            clip = pending.get(OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException ex) {
+            // The device is not answering. Give up on sound for a while; the alternative is
+            // parking the game thread in the driver until someone kills Forge.
+            stalledUntil.set(System.currentTimeMillis() + STALL_BACKOFF_MS);
+            pending.cancel(true);
+            System.err.println("Sound device did not open a line within "
+                    + OPEN_TIMEOUT_MS + "ms; muting effects for " + STALL_BACKOFF_MS + "ms");
+            return ClipWrapper.Dummy;
+        } catch (Exception ex) {
+            // A missing or unplayable file, or a device that refused the line. Either way this is
+            // a question about sound, and it used to travel up through play() into resolveStack().
+            failed = true;
+            return ClipWrapper.Dummy;
+        }
+        if (clip.isFailed()) {
+            failed = true;
+        } else {
+            clips.add(clip);
+            openClips.incrementAndGet();
+        }
+        return clip;
+    }
+
+    /**
+     * Give the device back the lines nobody is using. Without this the cap above is a one-way
+     * ratchet: the count stops climbing, but every line stays open until Forge exits and new
+     * effects are answered with silence for the rest of the session.
+     */
+    private static void reapIdleClips() {
+        final long cutoff = System.currentTimeMillis() - IDLE_TIMEOUT_MS;
+        for (AudioClip pool : pools) {
+            for (ClipWrapper clip : pool.clips) {
+                if (clip.isIdleSince(cutoff) && pool.clips.remove(clip)) {
+                    // close() can block in the driver exactly as open() can, so keep it off this
+                    // thread too -- a wedged device must not stop the rest of the pool being reaped.
+                    deviceExec.submit(clip::close);
+                }
+            }
+        }
     }
 
     private static boolean waitSoundSystemDelay() {
@@ -141,6 +234,8 @@ public class AudioClip implements IAudioClip {
     static class ClipWrapper {
         private final Clip clip;
         private boolean started;
+        private boolean closed;
+        private volatile long lastPlayed = System.currentTimeMillis();
         static final ClipWrapper Dummy = new ClipWrapper();
 
         private ClipWrapper() {
@@ -163,6 +258,10 @@ public class AudioClip implements IAudioClip {
                 return;
             }
             synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                lastPlayed = System.currentTimeMillis();
                 applyVolume(volume);
                 clip.setMicrosecondPosition(0);
                 this.started = false;
@@ -179,6 +278,10 @@ public class AudioClip implements IAudioClip {
                 return;
             }
             synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                lastPlayed = System.currentTimeMillis();
                 clip.setMicrosecondPosition(0);
                 this.started = false;
                 clip.loop(Clip.LOOP_CONTINUOUSLY);
@@ -191,12 +294,35 @@ public class AudioClip implements IAudioClip {
                 return;
             }
             synchronized (this) {
+                if (closed) {
+                    return;
+                }
                 clip.stop();
             }
         }
 
+        void close() {
+            if (null == clip) {
+                return;
+            }
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                clip.stop();
+                clip.close();
+            }
+            openClips.decrementAndGet();
+        }
+
         boolean isRunning() {
-            return clip != null && (clip.isRunning() || clip.isActive());
+            return clip != null && !closed && (clip.isRunning() || clip.isActive());
+        }
+
+        /** Idle, and last played before the cutoff -- so a reap never interrupts audible sound. */
+        boolean isIdleSince(long cutoff) {
+            return clip != null && !closed && !isRunning() && lastPlayed < cutoff;
         }
 
         private Clip createClip(String filename) {

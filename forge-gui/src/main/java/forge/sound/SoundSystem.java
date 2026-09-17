@@ -38,6 +38,12 @@ public class SoundSystem {
         this.visualizer = new EventVisualizer(GamePlayerUtil.getGuiPlayer());
     }
 
+    private static boolean soundEnabled() {
+        return GuiBase.getInterface().isLibgdxPort()
+                ? FModel.getPreferences().getPrefInt(FPref.UI_VOL_SOUNDS) >= 1
+                : FModel.getPreferences().getPrefBoolean(FPref.UI_ENABLE_SOUNDS);
+    }
+
     private static boolean isUsingAltSystem() {
         return !GuiBase.getInterface().isLibgdxPort() && FModel.getPreferences().getPrefBoolean(FPref.UI_ALT_SOUND_SYSTEM);
     }
@@ -97,7 +103,10 @@ public class SoundSystem {
     }
 
     public boolean hasResource(final SoundEffectType type) {
-        return !fetchResource(type).equals(emptySound);
+        // Asked while choosing which effect to play, on the game thread. Building a clip to answer
+        // it opens an audio line -- and on a busy device that blocks, or throws, out of what reads
+        // as a pure query. Look for the file instead.
+        return soundEnabled() && getSoundResource(type.getResourceFileName()) != null;
     }
 
     /**
