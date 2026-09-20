@@ -923,9 +923,19 @@ public class AttachAi extends SpellAbilityAi {
         final Card card = sa.getHostCard();
         List<GameObject> targets;
         final TargetRestrictions tgt = sa.getTargetRestrictions();
+        if (System.getProperty("mtg.dainDebug") != null) {
+            System.err.println("DAINDBG doTriggerNoCost sa=" + System.identityHashCode(sa)
+                    + " host=" + card.getName() + " mandatory=" + mandatory
+                    + " preExistingTargets=" + (tgt == null ? "n/a" : sa.getTargets().size()));
+        }
         if (tgt == null) {
             targets = AbilityUtils.getDefinedObjects(card, sa.getParam("Defined"), sa);
         } else {
+            // checkApiLogic() (canPlayAI's feasibility probe) runs attachPreference() speculatively
+            // on this same SpellAbility and leaves its pick in sa.getTargets() without undoing it.
+            // Without this reset, the real choice below is ADDED on top of that stale one, pushing
+            // the target count past the ability's max and failing isTargetNumberValid() downstream.
+            sa.resetTargets();
             attachPreference(sa, tgt, mandatory);
             targets = sa.getTargets();
         }
@@ -1022,6 +1032,12 @@ public class AttachAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
         }
 
+        if (System.getProperty("mtg.dainDebug") != null) {
+            System.err.println("DAINDBG preAdd sa=" + System.identityHashCode(sa)
+                    + " host=" + sa.getHostCard().getName()
+                    + " existingTargets=" + sa.getTargets().size()
+                    + " adding=" + o);
+        }
         sa.getTargets().add(o);
         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
     }
@@ -1335,6 +1351,12 @@ public class AttachAi extends SpellAbilityAi {
         Card attachSource = sa.getHostCard();
         if (sa.hasParam("Object")) {
             CardCollection objs = AbilityUtils.getDefinedCards(attachSource, sa.getParam("Object"), sa);
+            if (System.getProperty("mtg.dainDebug") != null) {
+                System.err.println("DAINDBG host=" + sa.getHostCard().getName()
+                        + " | Object$=" + sa.getParam("Object")
+                        + " | objs=" + objs.size()
+                        + (objs.isEmpty() ? "" : (" -> " + objs.get(0).getName())));
+            }
             if (objs.isEmpty()) {
                 if (!mandatory) {
                     return null;
@@ -1388,6 +1410,12 @@ public class AttachAi extends SpellAbilityAi {
         prefList = ComputerUtil.filterAITgts(sa, aiPlayer, prefList, true);
 
         Card c = attachGeneralAI(aiPlayer, sa, prefList, mandatory, attachSource, sa.getParam("AILogic"));
+        if (System.getProperty("mtg.dainDebug") != null) {
+            System.err.println("DAINDBG attachSource=" + attachSource.getName()
+                    + " | isAttachment=" + attachSource.isAttachment()
+                    + " | candidates=" + list.size() + " | prefList=" + prefList.size()
+                    + " | chosen=" + (c == null ? "NULL" : c.getName()));
+        }
 
         AiController aic = ((PlayerControllerAi)aiPlayer.getController()).getAi();
         if (c != null && attachSource.isEquipment()
