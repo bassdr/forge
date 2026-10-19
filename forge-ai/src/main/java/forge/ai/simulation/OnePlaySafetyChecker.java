@@ -28,6 +28,11 @@ public final class OnePlaySafetyChecker {
             // desperate plays are ok if next combat was already likely to kill AI
             return resultScore.value == Integer.MIN_VALUE
                     || resultScore.value >= (long) originalScore.value - expectedCardScoreLoss(player, sa, simulator);
+        } catch (RuntimeException e) {
+            // a failed simulation probe must accept the play, not crash the game
+            System.err.println("WARNING: OnePlaySafetyChecker simulation failed ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + "); accepting " + sa);
+            return true;
         } finally {
             CHECKING.remove();
         }
@@ -40,7 +45,7 @@ public final class OnePlaySafetyChecker {
             return 0;
         }
         Card simulatedSource = simulator.getGameCopier().find(source);
-        if (simulatedSource.isInZone(ZoneType.Hand)) {
+        if (simulatedSource == null || !simulatedSource.isInZone(ZoneType.Hand)) {
             return 0;
         }
         // Match GameStateEvaluator: excess cards are worth one point, other hand cards five.

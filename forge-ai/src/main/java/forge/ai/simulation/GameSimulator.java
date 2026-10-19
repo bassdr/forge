@@ -146,6 +146,9 @@ public class GameSimulator {
         }
         Card origHostCard = sa.getHostCard();
         Card hostCard = copier.find(origHostCard);
+        if (hostCard == null) {
+            return null;
+        }
         String desc = sa.getDescription();
         // TODO tests fail if this isn't checked first
         FCollectionView<SpellAbility> candidates = hostCard.getSpellAbilities();
@@ -232,6 +235,11 @@ public class GameSimulator {
         SpellAbility sa;
         if (origSa.isLandAbility()) {
             Card hostCard = (Card) copier.find(origSa.getHostCard());
+            if (hostCard == null) {
+                // land not part of the copy; score it unplayable
+                System.err.println("Simulation: land host not found! " + origSa);
+                return new Score(Integer.MIN_VALUE);
+            }
             if (origSa.canPlay()) {
                 aiPlayer.playLand(hostCard, origSa);
             } else {

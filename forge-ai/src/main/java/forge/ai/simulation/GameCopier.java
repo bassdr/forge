@@ -10,7 +10,9 @@ import forge.card.CardType;
 import forge.game.*;
 import forge.game.ability.effects.DetachedCardEffect;
 import forge.game.card.Card;
+import forge.game.card.CardCollection;
 import forge.game.card.CardCloneStates;
+import forge.game.card.CardCollectionView;
 import forge.game.card.CardCopyService;
 import forge.game.card.CardFactory;
 import forge.game.card.CounterType;
@@ -164,8 +166,14 @@ public class GameCopier {
         }
 
         // Undo effects first before calculating them below, to avoid them applying twice.
+        // one effect failing to undo must not crash the copy; skip and continue
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
-            effect.removeMapped(gameObjectMap);
+            try {
+                effect.removeMapped(gameObjectMap);
+            } catch (RuntimeException e) {
+                System.err.println("WARNING: GameCopier could not undo static effect " + effect
+                        + ": " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
         }
 
         if (origPhaseHandler.getCombat() != null) {
@@ -492,6 +500,31 @@ public class GameCopier {
         public GameObject map(GameObject o) {
             return find(o);
         }
+
+        // drop unmapped cards: a null would NPE one frame later
+        @Override
+        public CardCollection mapCollection(final CardCollectionView cards) {
+            final CardCollection collection = new CardCollection();
+            for (final Card c : cards) {
+                final Card mapped = map(c);
+                if (mapped != null) {
+                    collection.add(mapped);
+                }
+            }
+            return collection;
+        }
+
+        @Override
+        public <T extends GameObject> List<T> mapList(final List<T> objects) {
+            final List<T> result = new ArrayList<>();
+            for (final T o : objects) {
+                final T mapped = (T) map(o);
+                if (mapped != null) {
+                    result.add(mapped);
+                }
+            }
+            return result;
+        }
     }
 
     public <T extends GameObject> T find(T o) {
@@ -499,22 +532,24 @@ public class GameCopier {
             return (T) snapshot.find(o);
         }
 
-        T result = null;
         if (o instanceof Card) {
-            result = (T) cardMap.get(o);
+            T result = (T) cardMap.get(o);
             if (result != null) {
                 return result;
             } else {
-                System.out.println("Couldn't map " + o + "/" + System.identityHashCode(o));
+                System.err.println("WARNING: GameCopier could not map card " + o + "/" + System.identityHashCode(o));
             }
         } else if (o instanceof Player) {
-            result = (T) playerMap.get(o);
-            if (result != null)
+            T result = (T) playerMap.get(o);
+            if (result != null) {
                 return result;
+            } else {
+                System.err.println("WARNING: GameCopier could not map " + o + "/" + System.identityHashCode(o));
+            }
+        } else if (o != null) {
+            System.err.println("WARNING: GameCopier could not map " + o + "/" + System.identityHashCode(o));
         }
-        if (o != null)
-            throw new RuntimeException("Couldn't map " + o + "/" + System.identityHashCode(o));
-        return result;
+        return null;
     }
     public GameObject reverseFind(GameObject o) {
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {

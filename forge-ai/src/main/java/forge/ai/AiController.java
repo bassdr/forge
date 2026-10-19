@@ -1443,7 +1443,13 @@ public class AiController {
         memory.clearMemorySet(AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL);
 
         if (usesFullSimulation()) {
-            return singleSpellAbilityList(simPicker.chooseSpellAbilityToPlay(null));
+            try {
+                return singleSpellAbilityList(simPicker.chooseSpellAbilityToPlay(null));
+            } catch (RuntimeException e) {
+                // failed planner must fall back to the heuristic AI, not crash the game
+                System.err.println("WARNING: simulation AI failed (" + e.getClass().getSimpleName()
+                        + ": " + e.getMessage() + "); falling back to heuristic AI");
+            }
         }
 
         CardCollection playBeforeLand = CardLists.filter(
